@@ -3,13 +3,17 @@ package copy
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/rclone/rclone/cmd"
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/flags"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/operations/operationsflags"
 	"github.com/rclone/rclone/fs/sync"
+	"github.com/rclone/rclone/fs/sync/syncflags"
 	"github.com/spf13/cobra"
 )
 
@@ -17,12 +21,15 @@ var (
 	createEmptySrcDirs = false
 	loggerOpt          = operations.LoggerOpt{}
 	loggerFlagsOpt     = operationsflags.AddLoggerFlagsOptions{}
+	watch              = false
+	watchOpt           sync.WatchOptions
 )
 
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
 	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after copy", "")
+	syncflags.AddWatchFlags(cmdFlags, &watch, &watchOpt)
 	operationsflags.AddLoggerFlags(cmdFlags, &loggerOpt, &loggerFlagsOpt)
 	loggerOpt.LoggerFn = operations.NewDefaultLoggerFn(&loggerOpt)
 }
@@ -106,7 +113,7 @@ for more info.
 **Note**: Use the |--dry-run| or the |--interactive|/|-i| flag to test without
 copying anything.
 
-`, "|", "`") + operationsflags.Help(),
+`, "|", "`") + syncflags.WatchHelp() + "\n\n" + operationsflags.Help(),
 	Annotations: map[string]string{
 		"groups": "Copy,Filter,Listing,Important",
 	},
@@ -125,6 +132,14 @@ copying anything.
 				ctx = operations.WithSyncLogger(ctx, loggerOpt)
 			}
 
+			if watch {
+				if srcFileName != "" {
+					return fserrors.FatalError(errors.New("--watch needs a directory as the source, not a file"))
+				}
+				watchOpt.DeleteMode = fs.DeleteModeOff
+				watchOpt.CopyEmptySrcDirs = createEmptySrcDirs
+				return sync.Watch(ctx, fdst, fsrc, watchOpt)
+			}
 			if srcFileName == "" {
 				return sync.CopyDir(ctx, fdst, fsrc, createEmptySrcDirs)
 			}

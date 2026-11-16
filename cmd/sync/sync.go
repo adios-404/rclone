@@ -3,13 +3,17 @@ package sync
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"github.com/rclone/rclone/cmd"
+	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/config/flags"
+	"github.com/rclone/rclone/fs/fserrors"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fs/operations/operationsflags"
 	"github.com/rclone/rclone/fs/sync"
+	"github.com/rclone/rclone/fs/sync/syncflags"
 	"github.com/spf13/cobra"
 )
 
@@ -19,10 +23,16 @@ var (
 	loggerFlagsOpt     = operationsflags.AddLoggerFlagsOptions{}
 )
 
+var (
+	watch    = false
+	watchOpt sync.WatchOptions
+)
+
 func init() {
 	cmd.Root.AddCommand(commandDefinition)
 	cmdFlags := commandDefinition.Flags()
 	flags.BoolVarP(cmdFlags, &createEmptySrcDirs, "create-empty-src-dirs", "", createEmptySrcDirs, "Create empty source dirs on destination after sync", "")
+	syncflags.AddWatchFlags(cmdFlags, &watch, &watchOpt)
 	operationsflags.AddLoggerFlags(cmdFlags, &loggerOpt, &loggerFlagsOpt)
 	loggerOpt.LoggerFn = operations.NewDefaultLoggerFn(&loggerOpt)
 }
@@ -80,7 +90,7 @@ object/directory found in source/destination - ignoring" errors.
 See [this forum post](https://forum.rclone.org/t/sync-not-clearing-duplicates/14372)
 for more info.
 
-`, "|", "`") + operationsflags.Help(),
+`, "|", "`") + syncflags.WatchHelp() + "\n\n" + operationsflags.Help(),
 	Annotations: map[string]string{
 		"groups": "Sync,Copy,Filter,Listing,Important",
 	},
@@ -99,6 +109,14 @@ for more info.
 				ctx = operations.WithSyncLogger(ctx, loggerOpt)
 			}
 
+			if watch {
+				if srcFileName != "" {
+					return fserrors.FatalError(errors.New("--watch needs a directory as the source, not a file"))
+				}
+				watchOpt.DeleteMode = fs.GetConfig(ctx).DeleteMode
+				watchOpt.CopyEmptySrcDirs = createEmptySrcDirs
+				return sync.Watch(ctx, fdst, fsrc, watchOpt)
+			}
 			if srcFileName == "" {
 				return sync.Sync(ctx, fdst, fsrc, createEmptySrcDirs)
 			}
