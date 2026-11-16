@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -1052,6 +1053,100 @@ func Run(t *testing.T, opt *Opt) {
 			for _, dir := range dirs {
 				assert.NoError(t, f.Rmdir(ctx, dir))
 			}
+		})
+
+		// TestFsWatchChanges tests that changes are reported by
+		// WatchChanges
+		//
+		// go test -v -run '^TestIntegration$/^FsMkdir$/^FsWatchChanges$' ./backend/local
+		t.Run("FsWatchChanges", func(t *testing.T) {
+			skipIfNotOk(t)
+
+			// Check have WatchChanges
+			doWatchChanges := f.Features().WatchChanges
+			if doWatchChanges == nil {
+				t.Skip("FS has no WatchChanges interface")
+			}
+
+			var (
+				mu     sync.Mutex
+				events []fs.ChangeEvent
+				last   = time.Now() // when events was last added to
+			)
+			watchCtx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			err := doWatchChanges(watchCtx, func(batch []fs.ChangeEvent) {
+				mu.Lock()
+				defer mu.Unlock()
+				events = append(events, batch...)
+				last = time.Now()
+			})
+			require.NoError(t, err)
+
+			// Waits for the events from what has been done so far
+			// to stop arriving and forgets them, so that they
+			// aren't taken for those from what is done next
+			forgetChanges := func() {
+				for {
+					mu.Lock()
+					quiet := time.Since(last)
+					if quiet >= 500*time.Millisecond {
+						events = nil
+					}
+					mu.Unlock()
+					if quiet >= 500*time.Millisecond {
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+
+			// Waits for an event which covers remote
+			waitForChange := func(what, remote string) {
+				t.Helper()
+				covers := func(event fs.ChangeEvent) bool {
+					if event.Path == remote {
+						return true
+					}
+					return event.Recursive && (event.Path == "" || strings.HasPrefix(remote, event.Path+"/"))
+				}
+				deadline := time.Now().Add(30 * time.Second)
+				for {
+					mu.Lock()
+					got := events
+					found := slices.ContainsFunc(events, covers)
+					mu.Unlock()
+					if found {
+						forgetChanges()
+						return
+					}
+					if time.Now().After(deadline) {
+						require.Fail(t, "change not reported", "%s: no event covering %q in %+v", what, remote, got)
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+			}
+
+			const dir = "watchdir"
+			file := fstest.Item{
+				ModTime: time.Now(),
+				Path:    dir + "/file",
+			}
+
+			forgetChanges()
+			require.NoError(t, operations.Mkdir(ctx, f, dir))
+			waitForChange("mkdir", dir)
+
+			testPut(ctx, t, f, &file)
+			waitForChange("put", file.Path)
+
+			_, o := testPut(ctx, t, f, &file)
+			waitForChange("update", file.Path)
+
+			require.NoError(t, o.Remove(ctx))
+			waitForChange("remove", file.Path)
+
+			assert.NoError(t, f.Rmdir(ctx, dir))
 		})
 
 		// TestFsPut files writes file1, file2 and tests an update
