@@ -95,6 +95,9 @@ type Features struct {
 	// uses polling, it should adhere to the given interval.
 	ChangeNotify func(context.Context, func(string, EntryType), <-chan time.Duration)
 
+	// WatchChanges reports changes to notify until ctx is cancelled.
+	WatchChanges func(ctx context.Context, notify func([]ChangeEvent)) error
+
 	// UnWrap returns the Fs that this Fs is wrapping
 	UnWrap func() Fs
 
@@ -310,6 +313,9 @@ func (ft *Features) Fill(ctx context.Context, f Fs) *Features {
 	if do, ok := f.(ChangeNotifier); ok {
 		ft.ChangeNotify = do.ChangeNotify
 	}
+	if do, ok := f.(ChangeWatcher); ok {
+		ft.WatchChanges = do.WatchChanges
+	}
 	if do, ok := f.(UnWrapper); ok {
 		ft.UnWrap = do.UnWrap
 	}
@@ -422,6 +428,9 @@ func (ft *Features) Mask(ctx context.Context, f Fs) *Features {
 	}
 	if mask.ChangeNotify == nil {
 		ft.ChangeNotify = nil
+	}
+	if mask.WatchChanges == nil {
+		ft.WatchChanges = nil
 	}
 	// if mask.UnWrap == nil {
 	// 	ft.UnWrap = nil
@@ -578,6 +587,28 @@ type ChangeNotifier interface {
 	// regularly. When the channel gets closed, the implementation
 	// should stop polling and release resources.
 	ChangeNotify(context.Context, func(string, EntryType), <-chan time.Duration)
+}
+
+// ChangeEvent describes one change reported by a ChangeWatcher
+type ChangeEvent struct {
+	Path      string    // changed path relative to the Fs root, "" for the root
+	EntryType EntryType // a hint only, as the entry may no longer exist
+	Recursive bool      // everything at and below Path needs rechecking
+}
+
+// ChangeWatcher is an optional interface for Fs
+type ChangeWatcher interface {
+	// WatchChanges reports changes to notify until ctx is cancelled.
+	//
+	// It returns once watching is established, so no change made
+	// after it returns is missed. It returns an error if watching
+	// could not be started.
+	//
+	// notify is called from a single goroutine with one or more
+	// events. Events are hints: the caller should look at the path
+	// to find out what changed. An event with Recursive set means
+	// changes may have been missed at or below Path.
+	WatchChanges(ctx context.Context, notify func([]ChangeEvent)) error
 }
 
 // EntryType can be associated with remote paths to identify their type
