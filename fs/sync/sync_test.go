@@ -3188,6 +3188,27 @@ func blankMissingHashes(logger, lsf *bytes.Buffer) {
 	logger.Write(bytes.Join(loggerSplit, []byte("\n")))
 }
 
+// Test that the modtime of a directory is right after a directory in it is deleted
+func TestSyncDirModTimeAfterDeletingSubdirectory(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	if !r.Fremote.Features().CanHaveEmptyDirectories {
+		t.Skip("destination can't have empty directories")
+	}
+	file1 := r.WriteBoth(ctx, "dir/file.txt", "unchanged", t1)
+	r.WriteObject(ctx, "dir/deleted/sub/file.txt", "deleted from the source", t1)
+	require.NoError(t, operations.Mkdir(ctx, r.Fremote, "dir/empty"))
+	// Deleting the directories from the source changed the modtime of the directory they were in
+	_, err := operations.SetDirModTime(ctx, r.Flocal, nil, "dir", t2)
+	require.NoError(t, err)
+
+	accounting.GlobalStats().ResetCounters()
+	require.NoError(t, Sync(ctx, r.Fremote, r.Flocal, false))
+
+	r.CheckRemoteListing(t, []fstest.Item{file1}, []string{"dir"})
+	r.CheckDirectoryModTimes(t, "dir")
+}
+
 // canReplaceTypes reports whether a file and a directory of the same
 // name can't both be in f, so one has to be deleted to make way for
 // the other.
@@ -3480,4 +3501,98 @@ func TestCopyDoesNotReplaceTypes(t *testing.T) {
 	// The modification time of the old file isn't checked, as it is
 	// set to that of the directory in the source.
 	fstest.CheckListingWithPrecision(t, r.Fremote, []fstest.Item{old1, old2}, nil, fs.ModTimeNotSupported)
+}
+
+// Test that the modtime of a directory is right after deleting from
+// it when it matched the source beforehand, as it does if an earlier
+// sync set it but had errors so deleted nothing.
+func TestSyncDirModTimeAfterDeletingWhenAlreadyEqual(t *testing.T) {
+	ctx := context.Background()
+	r := fstest.NewRun(t)
+	if !r.Fremote.Features().CanHaveEmptyDirectories || r.Fremote.Features().DirSetModTime == nil {
+		t.Skip("destination can't have empty directories or set their modification times")
+	}
+	file1 := r.WriteBoth(ctx, "files/file.txt", "unchanged", t1)
+	file2 := r.WriteBoth(ctx, "dirs/file.txt", "unchanged", t1)
+	r.WriteObject(ctx, "files/deleted.txt", "deleted from the source", t1)
+	require.NoError(t, operations.Mkdir(ctx, r.Fremote, "dirs/deleted"))
+	for _, dir := range []string{"files", "dirs"} {
+		for _, f := range []fs.Fs{r.Flocal, r.Fremote} {
+			_, err := operations.SetDirModTime(ctx, f, nil, dir, t2)
+			require.NoError(t, err)
+		}
+	}
+
+	accounting.GlobalStats().ResetCounters()
+	require.NoError(t, Sync(ctx, r.Fremote, r.Flocal, false))
+
+	r.CheckRemoteListing(t, []fstest.Item{file1, file2}, []string{"files", "dirs"})
+	r.CheckDirectoryModTimes(t, "files", "dirs")
+}
+
+func TestSyncDoesNotDeleteDuringAfterErrors(t *testing.T) {
+	for name, mode := range map[string]fs.DeleteMode{"During": fs.DeleteModeDuring, "Before": fs.DeleteModeBefore} {
+		t.Run(name, func(t *testing.T) {
+			ctx, ci := fs.AddConfig(context.Background())
+			ci.DeleteMode = mode
+			r := fstest.NewRun(t)
+			file1 := r.WriteBoth(ctx, "file.txt", "in both", t1)
+			file2 := r.WriteObject(ctx, "dir/only-dst.txt", "not in the source", t1)
+
+			accounting.GlobalStats().ResetCounters()
+			_ = fs.CountError(ctx, errors.New("an earlier error"))
+			err := Sync(ctx, r.Fremote, r.Flocal, false)
+			accounting.GlobalStats().ResetCounters()
+			require.Error(t, err)
+			r.CheckRemoteItems(t, file1, file2)
+
+			// It is deleted when there hasn't been an error
+			require.NoError(t, Sync(ctx, r.Fremote, r.Flocal, false))
+			r.CheckRemoteItems(t, file1)
+		})
+	}
+}
+
+func TestSyncDoesNotDeleteWhatIsInUnreadableDirectory(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("can't make a directory unreadable")
+	}
+	for name, mode := range map[string]fs.DeleteMode{"During": fs.DeleteModeDuring, "Before": fs.DeleteModeBefore, "After": fs.DeleteModeAfter} {
+		t.Run(name, func(t *testing.T) {
+			ctx, ci := fs.AddConfig(context.Background())
+			ci.DeleteMode = mode
+			r := fstest.NewRun(t)
+			file1 := r.WriteBoth(ctx, "dir/file.txt", "in both", t1)
+			dir := filepath.Join(r.LocalName, "dir")
+			require.NoError(t, os.Chmod(dir, 0))
+			defer func() { _ = os.Chmod(dir, 0o777) }()
+
+			accounting.GlobalStats().ResetCounters()
+			err := Sync(ctx, r.Fremote, r.Flocal, false)
+			accounting.GlobalStats().ResetCounters()
+			require.Error(t, err)
+			r.CheckRemoteItems(t, file1)
+		})
+	}
+}
+
+func TestSyncDoesNotDeleteWhenSourceIsMissing(t *testing.T) {
+	for name, mode := range map[string]fs.DeleteMode{"During": fs.DeleteModeDuring, "Before": fs.DeleteModeBefore, "After": fs.DeleteModeAfter} {
+		t.Run(name, func(t *testing.T) {
+			ctx, ci := fs.AddConfig(context.Background())
+			ci.DeleteMode = mode
+			r := fstest.NewRun(t)
+			file1 := r.WriteObject(ctx, "file.txt", "in the destination", t1)
+			file2 := r.WriteObject(ctx, "dir/file.txt", "in the destination", t1)
+			// The directory the source is in has gone, as when a drive is unplugged
+			fsrc, err := fs.NewFs(ctx, r.LocalName+"/missing")
+			require.NoError(t, err)
+
+			accounting.GlobalStats().ResetCounters()
+			err = Sync(ctx, r.Fremote, fsrc, false)
+			accounting.GlobalStats().ResetCounters()
+			require.Error(t, err)
+			r.CheckRemoteItems(t, file1, file2)
+		})
+	}
 }
