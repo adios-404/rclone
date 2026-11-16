@@ -689,6 +689,13 @@ func (s *StatsInfo) GetDeletes() int64 {
 	return s.deletes
 }
 
+// GetDeletesSize returns the total size of the files deleted so far.
+func (s *StatsInfo) GetDeletesSize() int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.deletesSize
+}
+
 // DeletedDirs updates the stats for deletedDirs
 func (s *StatsInfo) DeletedDirs(deletedDirs int64) int64 {
 	s.mu.Lock()

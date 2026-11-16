@@ -99,6 +99,7 @@ type syncCopyMove struct {
 	setDirModTimesMaxLevel int                    // max level of the directories to set
 	modifiedDirs           map[string]struct{}    // dirs with changed contents (if s.setDirModTimeAfter)
 	allowOverlap           bool                   // whether we allow src and dst to overlap (i.e. for convmv)
+	marcher                march.Marcher          // called by the march, s unless what is synced is being limited
 }
 
 // For keeping track of delayed modtime sets
@@ -148,6 +149,7 @@ func newSyncCopyMove(ctx context.Context, fdst, fsrc fs.Fs, deleteMode fs.Delete
 		allowOverlap:           allowOverlap,
 	}
 
+	s.marcher = s
 	s.logger, s.usingLogger = operations.GetLogger(ctx)
 
 	if deleteMode == fs.DeleteModeOff {
@@ -816,7 +818,7 @@ func (s *syncCopyMove) run() error {
 		Fsrc:                   s.fsrc,
 		Dir:                    s.dir,
 		NoTraverse:             s.noTraverse,
-		Callback:               s,
+		Callback:               s.marcher,
 		DstIncludeAll:          s.fi.Opt.DeleteExcluded,
 		NoCheckDest:            s.noCheckDest,
 		NoUnicodeNormalization: s.noUnicodeNormalization,
