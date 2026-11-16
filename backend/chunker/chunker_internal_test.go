@@ -20,6 +20,7 @@ import (
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/fstest/fstests"
+	"github.com/rclone/rclone/fstest/mockfs"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1058,3 +1059,52 @@ func (f *Fs) InternalTest(t *testing.T) {
 }
 
 var _ fstests.InternalTester = (*Fs)(nil)
+
+// newWatchedFs returns an Fs to wrap whose WatchChanges reports batches
+func newWatchedFs(t *testing.T, batches ...[]fs.ChangeEvent) fs.Fs {
+	wrapped, err := mockfs.NewFs(context.Background(), "mock", "", nil)
+	require.NoError(t, err)
+	wrapped.Features().WatchChanges = func(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+		for _, batch := range batches {
+			notify(batch)
+		}
+		return nil
+	}
+	return wrapped
+}
+
+func TestWatchChanges(t *testing.T) {
+	ctx := context.Background()
+	newFs := func(base fs.Fs) *Fs {
+		f := &Fs{base: base}
+		f.opt.StartFrom = 1
+		require.NoError(t, f.setChunkNameFormat("*.rclone_chunk.###"))
+		return f
+	}
+
+	f := newFs(nil)
+	f.base = newWatchedFs(t, []fs.ChangeEvent{
+		{Path: f.makeChunkName("dir/big", 0, "", ""), EntryType: fs.EntryObject},
+		{Path: f.makeChunkName("dir/big", 1, "", ""), EntryType: fs.EntryObject},
+		{Path: "dir/big", EntryType: fs.EntryObject},
+		{Path: f.makeChunkName("uploading", 0, "", "abcd"), EntryType: fs.EntryObject},
+		{Path: "small", EntryType: fs.EntryObject},
+		{Path: f.makeChunkName("dir", 0, "", ""), EntryType: fs.EntryDirectory, Recursive: true},
+		{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+	})
+	var got [][]fs.ChangeEvent
+	require.NoError(t, f.WatchChanges(ctx, func(events []fs.ChangeEvent) {
+		got = append(got, events)
+	}))
+	assert.Equal(t, [][]fs.ChangeEvent{{
+		{Path: "dir/big", EntryType: fs.EntryObject},
+		{Path: "uploading", EntryType: fs.EntryObject},
+		{Path: "small", EntryType: fs.EntryObject},
+		{Path: "dir.rclone_chunk.001", EntryType: fs.EntryDirectory, Recursive: true},
+		{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+	}}, got)
+
+	base, err := mockfs.NewFs(ctx, "mock", "", nil)
+	require.NoError(t, err)
+	assert.Equal(t, fs.ErrorNotImplemented, newFs(base).WatchChanges(ctx, nil))
+}

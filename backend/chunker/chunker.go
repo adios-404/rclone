@@ -2004,6 +2004,32 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	do(ctx, wrappedNotifyFunc, pollIntervalChan)
 }
 
+// WatchChanges reports changes to notify until ctx is cancelled.
+//
+// Changes to chunks are reported as changes to the composite file.
+func (f *Fs) WatchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+	do := f.base.Features().WatchChanges
+	if do == nil {
+		return fs.ErrorNotImplemented
+	}
+	return do(ctx, func(events []fs.ChangeEvent) {
+		composite := make([]fs.ChangeEvent, 0, len(events))
+		for _, event := range events {
+			if event.EntryType != fs.EntryDirectory {
+				if mainPath, _, _, _ := f.parseChunkName(event.Path); mainPath != "" {
+					event.Path = mainPath
+				}
+			}
+			// Writing a file changes each of its chunks in turn
+			if n := len(composite); n > 0 && composite[n-1] == event {
+				continue
+			}
+			composite = append(composite, event)
+		}
+		notify(composite)
+	})
+}
+
 // Shutdown the backend, closing any background tasks and any
 // cached connections.
 func (f *Fs) Shutdown(ctx context.Context) error {
@@ -2608,6 +2634,7 @@ var (
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.Wrapper         = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
+	_ fs.ChangeWatcher   = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.ObjectInfo      = (*ObjectInfo)(nil)
 	_ fs.Object          = (*Object)(nil)

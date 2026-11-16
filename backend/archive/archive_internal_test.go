@@ -27,6 +27,7 @@ import (
 	"github.com/rclone/rclone/fs/sync"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/fstest/fstests"
+	"github.com/rclone/rclone/fstest/mockfs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -561,4 +562,43 @@ func TestArchiveZipSymlinkEscape(t *testing.T) {
 
 	_, err = os.Stat(filepath.Join(dir, "outside", "pwned.txt"))
 	assert.True(t, os.IsNotExist(err), "the archive wrote outside the destination")
+}
+
+// newWatchedFs returns an Fs to wrap whose WatchChanges reports batches
+func newWatchedFs(t *testing.T, batches ...[]fs.ChangeEvent) fs.Fs {
+	wrapped, err := mockfs.NewFs(context.Background(), "mock", "", nil)
+	require.NoError(t, err)
+	wrapped.Features().WatchChanges = func(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+		for _, batch := range batches {
+			notify(batch)
+		}
+		return nil
+	}
+	return wrapped
+}
+
+func TestWatchChanges(t *testing.T) {
+	ctx := context.Background()
+	wrapped := newWatchedFs(t, []fs.ChangeEvent{
+		{Path: "dir/file.txt", EntryType: fs.EntryObject},
+		{Path: "dir/files.zip", EntryType: fs.EntryObject},
+		{Path: "dir.zip", EntryType: fs.EntryDirectory},
+		{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+	})
+	f := &Fs{f: wrapped}
+	var got [][]fs.ChangeEvent
+	require.NoError(t, f.WatchChanges(ctx, func(events []fs.ChangeEvent) {
+		got = append(got, events)
+	}))
+	assert.Equal(t, [][]fs.ChangeEvent{{
+		{Path: "dir/file.txt", EntryType: fs.EntryObject},
+		{Path: "dir/files.zip", EntryType: fs.EntryDirectory, Recursive: true},
+		{Path: "dir.zip", EntryType: fs.EntryDirectory},
+		{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+	}}, got)
+
+	wrapped, err := mockfs.NewFs(ctx, "mock", "", nil)
+	require.NoError(t, err)
+	f = &Fs{f: wrapped}
+	assert.Equal(t, fs.ErrorNotImplemented, f.WatchChanges(ctx, nil))
 }

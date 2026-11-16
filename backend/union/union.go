@@ -489,6 +489,74 @@ func (f *Fs) ChangeNotify(ctx context.Context, fn func(string, fs.EntryType), ch
 	}()
 }
 
+// WatchChanges reports changes to all the upstreams to notify until
+// ctx is cancelled.
+//
+// It returns an error, and stops watching, if any of the upstreams
+// can't be watched.
+func (f *Fs) WatchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer func() {
+		if err != nil {
+			cancel() // stop watching the upstreams already started
+		}
+	}()
+	var mu sync.Mutex // stops the upstreams calling notify at the same time
+	serialNotify := func(events []fs.ChangeEvent) {
+		if len(events) == 0 {
+			return
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		notify(events)
+	}
+	for _, u := range f.upstreams {
+		do := u.Features().WatchChanges
+		if do == nil {
+			return fs.ErrorNotImplemented
+		}
+		err = do(ctx, serialNotify)
+		if err != nil && f.root != "" {
+			// The root may not exist on this upstream yet, so watch
+			// the whole upstream to see the root being made
+			if doRoot := u.RootFs.Features().WatchChanges; doRoot != nil {
+				err = doRoot(ctx, func(events []fs.ChangeEvent) {
+					serialNotify(f.changesUnderRoot(events))
+				})
+			}
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// changesUnderRoot maps the paths in events, which are relative to
+// the root of an upstream remote, into paths relative to the root of
+// f, leaving out the events for paths which aren't under it.
+func (f *Fs) changesUnderRoot(events []fs.ChangeEvent) []fs.ChangeEvent {
+	rootSlash := f.root + "/"
+	out := make([]fs.ChangeEvent, 0, len(events))
+	for _, event := range events {
+		switch {
+		case event.Path == f.root:
+			event.Path = ""
+		case strings.HasPrefix(event.Path, rootSlash):
+			event.Path = event.Path[len(rootSlash):]
+		case event.Path == "" || strings.HasPrefix(rootSlash, event.Path+"/"):
+			// A change to a parent of the root is a change to the root
+			event.Path = ""
+			event.EntryType = fs.EntryDirectory
+			event.Recursive = true
+		default:
+			continue
+		}
+		out = append(out, event)
+	}
+	return out
+}
+
 // DirCacheFlush resets the directory cache - used in testing
 // as an optional interface
 func (f *Fs) DirCacheFlush() {
@@ -1071,6 +1139,7 @@ var (
 	_ fs.MkdirMetadataer = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
+	_ fs.ChangeWatcher   = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.ListRer         = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)

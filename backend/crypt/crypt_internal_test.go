@@ -12,6 +12,7 @@ import (
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/fs/object"
+	"github.com/rclone/rclone/fstest/mockfs"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,4 +139,71 @@ func (f *Fs) InternalTest(t *testing.T) {
 	t.Run("ObjectInfo", func(t *testing.T) { testObjectInfo(t, f, false) })
 	t.Run("ObjectInfoWrap", func(t *testing.T) { testObjectInfo(t, f, true) })
 	t.Run("ComputeHash", func(t *testing.T) { testComputeHash(t, f) })
+}
+
+// newWatchedFs returns an Fs to wrap whose WatchChanges reports batches
+func newWatchedFs(t *testing.T, batches ...[]fs.ChangeEvent) fs.Fs {
+	wrapped, err := mockfs.NewFs(context.Background(), "mock", "", nil)
+	require.NoError(t, err)
+	wrapped.Features().WatchChanges = func(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+		for _, batch := range batches {
+			notify(batch)
+		}
+		return nil
+	}
+	return wrapped
+}
+
+func TestWatchChanges(t *testing.T) {
+	ctx := context.Background()
+	enc, err := NewNameEncoding("base32")
+	require.NoError(t, err)
+	watch := func(c *Cipher, batches ...[]fs.ChangeEvent) (got [][]fs.ChangeEvent) {
+		f := &Fs{Fs: newWatchedFs(t, batches...), cipher: c}
+		require.NoError(t, f.WatchChanges(ctx, func(events []fs.ChangeEvent) {
+			got = append(got, events)
+		}))
+		return got
+	}
+
+	t.Run("Standard", func(t *testing.T) {
+		c, err := newCipher(NameEncryptionStandard, "potato", "", true, enc)
+		require.NoError(t, err)
+		got := watch(c, []fs.ChangeEvent{
+			{Path: c.EncryptFileName("dir/file.txt"), EntryType: fs.EntryObject},
+			{Path: "dir/not encrypted", EntryType: fs.EntryObject},
+			{Path: c.EncryptDirName("dir"), EntryType: fs.EntryDirectory, Recursive: true},
+			{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+		}, []fs.ChangeEvent{
+			{Path: "not encrypted", EntryType: fs.EntryDirectory},
+		})
+		assert.Equal(t, [][]fs.ChangeEvent{{
+			{Path: "dir/file.txt", EntryType: fs.EntryObject},
+			{Path: "dir", EntryType: fs.EntryDirectory, Recursive: true},
+			{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+		}}, got)
+	})
+
+	t.Run("Off", func(t *testing.T) {
+		c, err := newCipher(NameEncryptionOff, "potato", "", true, enc)
+		require.NoError(t, err)
+		got := watch(c, []fs.ChangeEvent{
+			{Path: c.EncryptFileName("dir/file.txt"), EntryType: fs.EntryObject},
+			{Path: "dir", EntryType: fs.EntryDirectory},
+			// a directory which has gone can be reported as an object
+			{Path: "gone", EntryType: fs.EntryObject},
+		})
+		assert.Equal(t, [][]fs.ChangeEvent{{
+			{Path: "dir/file.txt", EntryType: fs.EntryObject},
+			{Path: "dir", EntryType: fs.EntryDirectory},
+			{Path: "gone", EntryType: fs.EntryObject},
+		}}, got)
+	})
+
+	t.Run("NotImplemented", func(t *testing.T) {
+		wrapped, err := mockfs.NewFs(ctx, "mock", "", nil)
+		require.NoError(t, err)
+		f := &Fs{Fs: wrapped}
+		assert.Equal(t, fs.ErrorNotImplemented, f.WatchChanges(ctx, nil))
+	})
 }

@@ -920,6 +920,46 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	do(ctx, wrappedNotifyFunc, pollIntervalChan)
 }
 
+// WatchChanges reports changes to notify until ctx is cancelled.
+//
+// Changes to names which can't be decrypted are not reported.
+func (f *Fs) WatchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+	do := f.Fs.Features().WatchChanges
+	if do == nil {
+		return fs.ErrorNotImplemented
+	}
+	return do(ctx, func(events []fs.ChangeEvent) {
+		decrypted := make([]fs.ChangeEvent, 0, len(events))
+		for _, event := range events {
+			path, err := f.decryptChangePath(event)
+			if err != nil {
+				fs.Debugf(f, "WatchChanges was unable to decrypt %q: %v", event.Path, err)
+				continue
+			}
+			event.Path = path
+			decrypted = append(decrypted, event)
+		}
+		if len(decrypted) > 0 {
+			notify(decrypted)
+		}
+	})
+}
+
+// decryptChangePath decrypts the path of event
+func (f *Fs) decryptChangePath(event fs.ChangeEvent) (string, error) {
+	if event.Path == "" {
+		return "", nil
+	}
+	if event.EntryType != fs.EntryDirectory {
+		decrypted, err := f.cipher.DecryptFileName(event.Path)
+		if err == nil {
+			return decrypted, nil
+		}
+		// EntryType is only a hint, so this may be a directory which has gone
+	}
+	return f.cipher.DecryptDirName(event.Path)
+}
+
 var commandHelp = []fs.CommandHelp{
 	{
 		Name:  "encode",
@@ -1328,6 +1368,7 @@ var (
 	_ fs.MkdirMetadataer = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
+	_ fs.ChangeWatcher   = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.UserInfoer      = (*Fs)(nil)
 	_ fs.Disconnecter    = (*Fs)(nil)

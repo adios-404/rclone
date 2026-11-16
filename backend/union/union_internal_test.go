@@ -3,16 +3,20 @@ package union
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/rclone/rclone/backend/union/upstream"
 	"github.com/rclone/rclone/fs"
 	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/fs/operations"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/fstest/fstests"
+	"github.com/rclone/rclone/fstest/mockfs"
 	"github.com/rclone/rclone/lib/random"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -161,5 +165,121 @@ func TestMoveCopy(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, fileMemory.Size, obj.Size())
 		})
+	})
+}
+
+// watchedUpstream stands in for the WatchChanges of an upstream
+type watchedUpstream struct {
+	err    error                  // returned by watchChanges
+	ctx    context.Context        // passed to watchChanges
+	notify func([]fs.ChangeEvent) // passed to watchChanges
+}
+
+// watchChanges implements WatchChanges
+func (w *watchedUpstream) watchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+	w.ctx, w.notify = ctx, notify
+	return w.err
+}
+
+// newWatchedFs returns an Fs watched by w, or one which can't be
+// watched if w is nil
+func newWatchedFs(t *testing.T, w *watchedUpstream) fs.Fs {
+	f, err := mockfs.NewFs(context.Background(), "mock", "", nil)
+	require.NoError(t, err)
+	if w != nil {
+		f.Features().WatchChanges = w.watchChanges
+	}
+	return f
+}
+
+func TestWatchChanges(t *testing.T) {
+	// newFs returns a union of an upstream for each of ws
+	newFs := func(t *testing.T, ws ...*watchedUpstream) (f *Fs) {
+		f = &Fs{}
+		for _, w := range ws {
+			uFs := newWatchedFs(t, w)
+			f.upstreams = append(f.upstreams, &upstream.Fs{Fs: uFs, RootFs: uFs})
+		}
+		return f
+	}
+	file := []fs.ChangeEvent{{Path: "dir/file.txt", EntryType: fs.EntryObject}}
+	rescan := []fs.ChangeEvent{{Path: "", EntryType: fs.EntryDirectory, Recursive: true}}
+
+	t.Run("AllUpstreams", func(t *testing.T) {
+		w1, w2 := &watchedUpstream{}, &watchedUpstream{}
+		f := newFs(t, w1, w2)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		var got [][]fs.ChangeEvent
+		require.NoError(t, f.WatchChanges(ctx, func(events []fs.ChangeEvent) {
+			got = append(got, events)
+		}))
+		w1.notify(file)
+		w2.notify(rescan)
+		assert.Equal(t, [][]fs.ChangeEvent{file, rescan}, got)
+
+		// notify must not be called by both upstreams at once
+		var wg sync.WaitGroup
+		for _, w := range []*watchedUpstream{w1, w2} {
+			wg.Go(func() {
+				for range 100 {
+					w.notify(file)
+				}
+			})
+		}
+		wg.Wait()
+		assert.Len(t, got, 202)
+
+		assert.NoError(t, w1.ctx.Err())
+		assert.NoError(t, w2.ctx.Err())
+		cancel()
+		assert.Error(t, w1.ctx.Err())
+		assert.Error(t, w2.ctx.Err())
+	})
+
+	t.Run("UpstreamFails", func(t *testing.T) {
+		errFailed := errors.New("failed to watch")
+		w1, w2 := &watchedUpstream{}, &watchedUpstream{err: errFailed}
+		f := newFs(t, w1, w2)
+		assert.Equal(t, errFailed, f.WatchChanges(context.Background(), nil))
+		assert.Error(t, w1.ctx.Err(), "the upstream which started must be stopped")
+	})
+
+	t.Run("UpstreamCantWatch", func(t *testing.T) {
+		w1 := &watchedUpstream{}
+		f := newFs(t, w1, nil)
+		assert.Equal(t, fs.ErrorNotImplemented, f.WatchChanges(context.Background(), nil))
+		assert.Error(t, w1.ctx.Err(), "the upstream which started must be stopped")
+	})
+
+	t.Run("RootMissing", func(t *testing.T) {
+		// The root doesn't exist on the second upstream so it can
+		// only be watched from the root of the upstream remote
+		w1, w2, w2Root := &watchedUpstream{}, &watchedUpstream{err: errors.New("no such directory")}, &watchedUpstream{}
+		f := newFs(t, w1, w2)
+		f.root = "dir/root"
+		f.upstreams[1].RootFs = newWatchedFs(t, w2Root)
+		var got [][]fs.ChangeEvent
+		require.NoError(t, f.WatchChanges(context.Background(), func(events []fs.ChangeEvent) {
+			got = append(got, events)
+		}))
+		w1.notify(file)
+		w2Root.notify([]fs.ChangeEvent{
+			{Path: "dir/root/sub/file.txt", EntryType: fs.EntryObject},
+			{Path: "dir/root", EntryType: fs.EntryDirectory, Recursive: true},
+			{Path: "dir", EntryType: fs.EntryObject},
+			{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+			{Path: "dir/other/file.txt", EntryType: fs.EntryObject},
+			{Path: "dir/rooted", EntryType: fs.EntryObject},
+		})
+		w2Root.notify([]fs.ChangeEvent{
+			{Path: "elsewhere", EntryType: fs.EntryObject},
+		})
+		assert.Equal(t, [][]fs.ChangeEvent{file, {
+			{Path: "sub/file.txt", EntryType: fs.EntryObject},
+			{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+			{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+			{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+		}}, got)
 	})
 }

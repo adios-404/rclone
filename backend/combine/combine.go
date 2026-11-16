@@ -663,6 +663,60 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	}()
 }
 
+// WatchChanges reports changes to all the upstreams to notify until
+// ctx is cancelled.
+//
+// It returns an error, and stops watching, if any of the upstreams
+// can't be watched.
+func (f *Fs) WatchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) (err error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer func() {
+		if err != nil {
+			cancel() // stop watching the upstreams already started
+		}
+	}()
+	var mu sync.Mutex // stops the upstreams calling notify at the same time
+	for _, u := range f.upstreams {
+		do := u.f.Features().WatchChanges
+		if do == nil {
+			return fs.ErrorNotImplemented
+		}
+		err = do(ctx, func(events []fs.ChangeEvent) {
+			adjusted := u.adjustChangeEvents(events)
+			if len(adjusted) == 0 {
+				return
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			notify(adjusted)
+		})
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// adjustChangeEvents maps the upstream paths in events into combine
+// paths, leaving out the events for paths which aren't under the root.
+func (u *upstream) adjustChangeEvents(events []fs.ChangeEvent) []fs.ChangeEvent {
+	adjusted := make([]fs.ChangeEvent, 0, len(events))
+	for _, event := range events {
+		newPath, err := u.pathAdjustment.do(event.Path)
+		if err != nil {
+			// A change to a parent of the root is a change to the root
+			if !strings.HasPrefix(u.pathAdjustment.rootSlash, join(u.dir, event.Path)+"/") {
+				continue
+			}
+			event.EntryType = fs.EntryDirectory
+			event.Recursive = true
+		}
+		event.Path = newPath
+		adjusted = append(adjusted, event)
+	}
+	return adjusted
+}
+
 // DirCacheFlush resets the directory cache - used in testing
 // as an optional interface
 func (f *Fs) DirCacheFlush() {
@@ -1183,6 +1237,7 @@ var (
 	_ fs.DirMover        = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
+	_ fs.ChangeWatcher   = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.ListRer         = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)

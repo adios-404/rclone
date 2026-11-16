@@ -393,6 +393,28 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	do(ctx, wrappedNotifyFunc, ch)
 }
 
+// WatchChanges reports changes to notify until ctx is cancelled.
+//
+// A change to an archive is reported as a change to everything in
+// the directory it is shown as.
+func (f *Fs) WatchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+	do := f.f.Features().WatchChanges
+	if do == nil {
+		return fs.ErrorNotImplemented
+	}
+	return do(ctx, func(events []fs.ChangeEvent) {
+		out := make([]fs.ChangeEvent, len(events))
+		for i, event := range events {
+			if event.EntryType != fs.EntryDirectory && findArchive(event.Path) != nil {
+				event.EntryType = fs.EntryDirectory
+				event.Recursive = true
+			}
+			out[i] = event
+		}
+		notify(out)
+	})
+}
+
 // DirCacheFlush resets the directory cache - used in testing
 // as an optional interface
 func (f *Fs) DirCacheFlush() {
@@ -705,6 +727,7 @@ var (
 	_ fs.DirMover        = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
+	_ fs.ChangeWatcher   = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)

@@ -25,6 +25,7 @@ import (
 	"github.com/rclone/rclone/fs/object"
 	"github.com/rclone/rclone/fstest"
 	"github.com/rclone/rclone/fstest/fstests"
+	"github.com/rclone/rclone/fstest/mockfs"
 )
 
 func TestObjectMetadataValidate(t *testing.T) {
@@ -274,4 +275,46 @@ func TestZstdLevelOff(t *testing.T) {
 	assert.Equal(t, Uncompressed, o.meta.Mode)
 	assert.Equal(t, int64(len(content)), o.Object.Size())
 	assert.True(t, strings.HasSuffix(o.Object.Remote(), uncompressedFileExt), o.Object.Remote())
+}
+
+// newWatchedFs returns an Fs to wrap whose WatchChanges reports batches
+func newWatchedFs(t *testing.T, batches ...[]fs.ChangeEvent) fs.Fs {
+	wrapped, err := mockfs.NewFs(context.Background(), "mock", "", nil)
+	require.NoError(t, err)
+	wrapped.Features().WatchChanges = func(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+		for _, batch := range batches {
+			notify(batch)
+		}
+		return nil
+	}
+	return wrapped
+}
+
+func TestWatchChanges(t *testing.T) {
+	ctx := context.Background()
+	wrapped := newWatchedFs(t, []fs.ChangeEvent{
+		{Path: makeDataName("dir/file.txt", 100, Gzip), EntryType: fs.EntryObject},
+		{Path: makeMetadataName("dir/file.txt"), EntryType: fs.EntryObject},
+		{Path: makeDataName("stored", 100, Uncompressed), EntryType: fs.EntryObject},
+		{Path: "not ours", EntryType: fs.EntryObject},
+		{Path: makeMetadataName("dir"), EntryType: fs.EntryDirectory, Recursive: true},
+		{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+	})
+	f := &Fs{Fs: wrapped, modeHandler: &gzipModeHandler{}}
+	var got [][]fs.ChangeEvent
+	require.NoError(t, f.WatchChanges(ctx, func(events []fs.ChangeEvent) {
+		got = append(got, events)
+	}))
+	assert.Equal(t, [][]fs.ChangeEvent{{
+		{Path: "dir/file.txt", EntryType: fs.EntryObject},
+		{Path: "stored", EntryType: fs.EntryObject},
+		{Path: "not ours", EntryType: fs.EntryObject},
+		{Path: "dir.json", EntryType: fs.EntryDirectory, Recursive: true},
+		{Path: "", EntryType: fs.EntryDirectory, Recursive: true},
+	}}, got)
+
+	wrapped, err := mockfs.NewFs(ctx, "mock", "", nil)
+	require.NoError(t, err)
+	f = &Fs{Fs: wrapped}
+	assert.Equal(t, fs.ErrorNotImplemented, f.WatchChanges(ctx, nil))
 }

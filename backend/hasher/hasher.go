@@ -354,6 +354,14 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	}
 }
 
+// WatchChanges reports changes to notify until ctx is cancelled.
+func (f *Fs) WatchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+	if do := f.Fs.Features().WatchChanges; do != nil {
+		return do(ctx, notify)
+	}
+	return fs.ErrorNotImplemented
+}
+
 // UserInfo returns info about the connected user
 func (f *Fs) UserInfo(ctx context.Context) (map[string]string, error) {
 	if do := f.Fs.Features().UserInfo; do != nil {
@@ -599,6 +607,7 @@ var (
 	_ fs.MkdirMetadataer = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
+	_ fs.ChangeWatcher   = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.UserInfoer      = (*Fs)(nil)
 	_ fs.Disconnecter    = (*Fs)(nil)

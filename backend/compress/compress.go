@@ -1072,6 +1072,35 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	do(ctx, wrappedNotifyFunc, pollIntervalChan)
 }
 
+// WatchChanges reports changes to notify until ctx is cancelled.
+//
+// Changes to data and metadata files are reported as changes to the
+// file they make up.
+func (f *Fs) WatchChanges(ctx context.Context, notify func([]fs.ChangeEvent)) error {
+	do := f.Fs.Features().WatchChanges
+	if do == nil {
+		return fs.ErrorNotImplemented
+	}
+	return do(ctx, func(events []fs.ChangeEvent) {
+		unwrapped := make([]fs.ChangeEvent, 0, len(events))
+		for _, event := range events {
+			if event.EntryType != fs.EntryDirectory {
+				if remote, isMetadataFile := unwrapMetadataFile(event.Path); isMetadataFile {
+					event.Path = remote
+				} else if remote, _, _, err := processFileName(event.Path, f.modeHandler); err == nil {
+					event.Path = remote
+				}
+			}
+			// Writing a file changes its data file then its metadata file
+			if n := len(unwrapped); n > 0 && unwrapped[n-1] == event {
+				continue
+			}
+			unwrapped = append(unwrapped, event)
+		}
+		notify(unwrapped)
+	})
+}
+
 // PublicLink generates a public link to the remote path (usually readable by anyone)
 func (f *Fs) PublicLink(ctx context.Context, remote string, duration fs.Duration, unlink bool) (string, error) {
 	do := f.Fs.Features().PublicLink
@@ -1583,6 +1612,7 @@ var (
 	_ fs.MergeDirser     = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
 	_ fs.ChangeNotifier  = (*Fs)(nil)
+	_ fs.ChangeWatcher   = (*Fs)(nil)
 	_ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.Shutdowner      = (*Fs)(nil)
 	_ fs.FullObjectInfo  = (*ObjectInfo)(nil)
