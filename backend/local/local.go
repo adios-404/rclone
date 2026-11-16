@@ -29,6 +29,7 @@ import (
 	"github.com/rclone/rclone/fs/hash"
 	"github.com/rclone/rclone/lib/encoder"
 	"github.com/rclone/rclone/lib/file"
+	"github.com/rclone/rclone/lib/fswatch"
 	"github.com/rclone/rclone/lib/readers"
 	"golang.org/x/text/unicode/norm"
 )
@@ -507,6 +508,9 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	if opt.NoClone {
 		// Disable server-side copy when --local-no-clone is set
 		f.features.Copy = nil
+	}
+	if !fswatch.Supported() {
+		f.features.WatchChanges = nil
 	}
 
 	// Check to see if this points to a file

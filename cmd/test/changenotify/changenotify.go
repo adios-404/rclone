@@ -34,14 +34,22 @@ var commandDefinition = &cobra.Command{
 		f := cmd.NewFsSrc(args)
 		ctx := context.Background()
 
-		// Start polling function
 		features := f.Features()
+		watching := features.WatchChanges != nil
+		if watching {
+			if err := features.WatchChanges(ctx, watchChanges); err != nil {
+				return err
+			}
+			fs.Logf(nil, "Waiting for changes to be reported")
+		}
+
+		// Start polling function
 		if do := features.ChangeNotify; do != nil {
 			pollChan := make(chan time.Duration)
 			do(ctx, changeNotify, pollChan)
 			pollChan <- time.Duration(pollInterval)
 			fs.Logf(nil, "Waiting for changes, polling every %v", pollInterval)
-		} else {
+		} else if !watching {
 			return errors.New("poll-interval is not supported by this remote")
 		}
 		select {}
@@ -54,4 +62,15 @@ var commandDefinition = &cobra.Command{
 // if entryType is a directory it invalidates the parent of the directory too.
 func changeNotify(relativePath string, entryType fs.EntryType) {
 	fs.Logf(nil, "%q: %v", relativePath, entryType)
+}
+
+// watchChanges logs the events reported by the WatchChanges feature
+func watchChanges(events []fs.ChangeEvent) {
+	for _, event := range events {
+		recursive := ""
+		if event.Recursive {
+			recursive = " and everything below it"
+		}
+		fs.Logf(nil, "%q: %v%s", event.Path, event.EntryType, recursive)
+	}
 }
